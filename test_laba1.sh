@@ -1,6 +1,6 @@
 #!/bin/bash
-# Использование: sudo ./test_backup.sh [размер_папки_MB] [заполнение_%] [мин_файлов] [макс_файлов]
-# Пример:        sudo ./test_backup.sh 50 70 10 40
+# Использование: sudo ./test_laba1.sh [размер_папки_MB] [заполнение_%] [мин_файлов] [макс_файлов]
+# Пример:        sudo ./test_laba1.sh 50 70 10 40
 
 SCRIPT="$(dirname "$(readlink -f "$0")")/laba1.sh"
 
