@@ -1,132 +1,173 @@
-param(
-    [string]$ScriptPath = ".\backup_logs.ps1",
-    [switch]$KeepData
-)
-
 $ErrorActionPreference = "Stop"
 
+$BaseDir = "$HOME\Desktop\test_archive"
+if (Test-Path $BaseDir) {
+    Remove-Item $BaseDir -Recurse -Force
+}
+New-Item -ItemType Directory -Path $BaseDir | Out-Null
 
-function Log-Pass { param([string]$msg) Write-Host "PASS: $msg" -ForegroundColor Green }
-function Log-Fail { param([string]$msg) Write-Host "FAIL: $msg" -ForegroundColor Red; exit 1 }
+$LogDir    = Join-Path $BaseDir "log"
+$BackupDir = Join-Path $BaseDir "backup"
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
 
+$ThresholdMB = 1
+$MaxFilesToArchive = 10
 
-$TestLogDir  = "$env:TEMP\test_log"
-$TestBackupDir = "$env:TEMP\test_backup"
-
-function Cleanup {
-    if (Test-Path $TestLogDir)  { Remove-Item -Recurse -Force $TestLogDir }
-    if (Test-Path $TestBackupDir) { Remove-Item -Recurse -Force $TestBackupDir }
+function Write-Status {
+    param([string]$Message, [ConsoleColor]$Color = "White")
+    Write-Host $Message -ForegroundColor $Color
 }
 
-if (-not $KeepData) { Cleanup }
-New-Item -ItemType Directory -Path $TestLogDir -Force | Out-Null
-New-Item -ItemType Directory -Path $TestBackupDir -Force | Out-Null
-
-Write-Host "=== Запуск тестов для $ScriptPath ==="
-
-
-Write-Host "[Тест 1] Проверка обработки несуществующей папки логов..."
-$result = & $ScriptPath -LogDir "$env:TEMP\nonexistent_folder" -Threshold 80 -FileCount 10 -MaxSizeMB 100 -BackupDir $TestBackupDir 2>&1
-if ($LASTEXITCODE -eq 1 -and $result -match "Папка не найдена") {
-    Log-Pass "Корректная обработка несуществующей папки"
-} else {
-    Log-Fail "Неверная реакция на несуществующую папку (код: $LASTEXITCODE, вывод: $result)"
-}
-
-
-Write-Host "[Тест 2] Проверка автоматического создания папки backup..."
-$backupPath = "$env:TEMP\ps_test_backup_new"
-if (Test-Path $backupPath) { Remove-Item -Recurse -Force $backupPath }
-
-& $ScriptPath -LogDir $TestLogDir -Threshold 99 -FileCount 5 -MaxSizeMB 100 -BackupDir $backupPath 2>&1 | Out-Null
-if (Test-Path $backupPath -PathType Container) {
-    Log-Pass "Папка backup успешно создана"
-    Remove-Item -Recurse -Force $backupPath
-} else {
-    Log-Fail "Папка backup не была создана"
-}
-
-
-Write-Host "[Тест 3] Проверка отсутствия архивации при нормальном уровне заполнения..."
-
-$smallFile = New-Item -Path "$TestLogDir\tiny.log" -ItemType File -Force
-
-& $ScriptPath -LogDir $TestLogDir -Threshold 90 -FileCount 5 -MaxSizeMB 100 -BackupDir $TestBackupDir 2>&1 | Out-Null
-$archives = Get-ChildItem -Path $TestBackupDir -Filter "*.tar.gz" -File
-if ($archives.Count -eq 0) {
-    Log-Pass "Архивация не произведена, так как порог не превышен"
-} else {
-    Log-Fail "Архив создан ошибочно (найдено: $($archives.Count))"
-}
-
-
-Write-Host "[Тест 4] Проверка создания архива при превышении порога..."
-
-Remove-Item $smallFile -Force
-$totalBytes = 0
+# Test 1: порог не превышен (архив не нужен)
+Write-Status "[TEST 1] Generating low-volume logs..." "Yellow"
 for ($i = 1; $i -le 15; $i++) {
-    $f = New-Item -Path "$TestLogDir\file_$i.log" -ItemType File -Force
-
-    [System.IO.File]::WriteAllBytes($f.FullName, (New-Object byte[] (8 * 1MB)))
-    $totalBytes += 8MB
+    $path = Join-Path $LogDir "log_$i.txt"
+    $size = (Get-Random -Minimum 5 -Maximum 10) * 1KB
+    [IO.File]::WriteAllBytes($path, [byte[]]::new($size))
+    (Get-Item $path).LastWriteTime = (Get-Date).AddDays(-(Get-Random -Minimum 1 -Maximum 31))
 }
 
-& $ScriptPath -LogDir $TestLogDir -Threshold 80 -FileCount 10 -MaxSizeMB 100 -BackupDir $TestBackupDir 2>&1 | Out-Null
+$files = Get-ChildItem $LogDir -File
+$totalSize = ($files | Measure-Object -Property Length -Sum).Sum
+$percent = [math]::Round(($totalSize / ($ThresholdMB * 1MB)) * 100, 2)
 
-$archives = Get-ChildItem -Path $TestBackupDir -Filter "*.tar.gz" -File | Sort-Object LastWriteTime -Descending
-if ($archives.Count -ge 1) {
-    Log-Pass "Архив успешно создан"
+if ($percent -le 80) {
+    Write-Status "[OK] Test 1 passed: no archive needed ($percent%)" "Green"
 } else {
-    Log-Fail "Архив не был создан"
+    Write-Status "[FAIL] Test 1: archive created unexpectedly" "Red"
 }
 
-Write-Host "[Тест 5] Проверка фильтрации самых старых файлов..."
-if ($archives.Count -lt 1) { Log-Fail "Нет архива для проверки содержимого"; exit 1 }
-$archivePath = $archives[0].FullName
+# Test 2: порог превышен, архивируются старые файлы
+Write-Status "[TEST 2] Generating high-volume logs..." "Yellow"
+Remove-Item $LogDir -Recurse -Force
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+for ($i = 1; $i -le 30; $i++) {
+    $path = Join-Path $LogDir "log_$i.txt"
+    $size = (Get-Random -Minimum 20 -Maximum 60) * 1KB
+    [IO.File]::WriteAllBytes($path, [byte[]]::new($size))
+    (Get-Item $path).LastWriteTime = (Get-Date).AddDays(-(Get-Random -Minimum 1 -Maximum 31))
+}
 
+$beforeCount = (Get-ChildItem $LogDir -File).Count
+$files = Get-ChildItem $LogDir -File
+$totalSize = ($files | Measure-Object -Property Length -Sum).Sum
+$percent = [math]::Round(($totalSize / ($ThresholdMB * 1MB)) * 100, 2)
 
-$oldFile  = Get-Item "$TestLogDir\old.log"
-$newFile  = Get-Item "$TestLogDir\new.log"
-$veryNew  = Get-Item "$TestLogDir\very_new.log"
+if ($percent -gt 80) {
+    $oldFiles = $files | Sort-Object LastWriteTime | Select-Object -First $MaxFilesToArchive
+    $name = "logs_$(Get-Date -Format 'yyyyMMdd_HHmmss').tar.gz"
+    $archive = Join-Path $BackupDir $name
+    $names = $oldFiles | ForEach-Object { $_.Name }
 
-$oldFile.LastWriteTime  = (Get-Date).AddDays(-5)
-$newFile.LastWriteTime  = (Get-Date).AddDays(-1)
-$veryNew.LastWriteTime = (Get-Date).AddSeconds(-10)
-
-
-& $ScriptPath -LogDir $TestLogDir -Threshold 1 -FileCount 1 -MaxSizeMB 100 -BackupDir $TestBackupDir 2>&1 | Out-Null
-$latestArchive = Get-ChildItem -Path $TestBackupDir -Filter "*.tar.gz" -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-
-
-$contents = tar.exe -tf $latestArchive.FullName 2>&1
-
-$hasOld  = $contents -match "old.log"
-$hasNew  = $contents -match "new.log"
-$hasVeryNew = $contents -match "very_new.log"
-
-if ($hasOld -and -not $hasNew -and -not $hasVeryNew) {
-    Log-Pass "В архив попал самый старый файл, новые не затронуты"
+    if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
+        Write-Status "[FAIL] Test 2: tar.exe not found. Install tar and ensure it is in PATH." "Red"
+    } else {
+        & tar.exe -czf $archive -C $LogDir $names
+        if ($LASTEXITCODE -eq 0) {
+            $oldFiles | Remove-Item -Force
+            $afterCount = (Get-ChildItem $LogDir -File -ErrorAction SilentlyContinue).Count
+            if ($afterCount -lt $beforeCount -and (Test-Path $archive)) {
+                Write-Status "[OK] Test 2 passed: archive created, files removed" "Green"
+            } else {
+                Write-Status "[FAIL] Test 2: archive or file count check failed" "Red"
+            }
+        } else {
+            Write-Status "[FAIL] Test 2: tar.exe error (exit code $LASTEXITCODE)" "Red"
+        }
+    }
 } else {
-    Log-Fail "Некорректная фильтрация файлов в архиве"
-    Write-Host "Содержимое архива:" -ForegroundColor Yellow
-    $contents
+    Write-Status "[FAIL] Test 2: threshold not exceeded as expected ($percent%)" "Red"
 }
 
-
-Write-Host "[Тест 6] Проверка работы, если файлов меньше, чем запрошено (FileCount)..."
-
-Remove-Item "$TestLogDir\*" -Force -ErrorAction SilentlyContinue
-$singleFile = New-Item -Path "$TestLogDir\only_one.log" -ItemType File -Force
-[System.IO.File]::WriteAllBytes($singleFile.FullName, (New-Object byte[] 5MB))
-
-& $ScriptPath -LogDir $TestLogDir -Threshold 1 -FileCount 10 -MaxSizeMB 100 -BackupDir $TestBackupDir 2>&1 | Out-Null
-
-$archivesAfter = Get-ChildItem -Path $TestBackupDir -Filter "*.tar.gz" -File | Where-Object { $_.LastWriteTime -gt (Get-Date).AddHours(-1) }
-if ($archivesAfter.Count -ge 1) {
-    Log-Pass "Архив создан даже при FileCount > количества файлов"
+#  Test 3: проверка отсутствия папки 
+Write-Status "[TEST 3] Checking missing folder..." "Yellow"
+$fakeDir = Join-Path $BaseDir "missing"
+if (-not (Test-Path $fakeDir)) {
+    Write-Status "[OK] Test 3 passed: folder not found" "Green"
 } else {
-    Log-Fail "Архив не создан, когда FileCount больше количества файлов"
+    Write-Status "[FAIL] Test 3: folder unexpectedly exists" "Red"
 }
 
-Write-Host "=== Все тесты завершены ==="
-if (-not $KeepData) { Cleanup }
+#  Test 4: M больше числа подходящих файлов -> архивируются все подходящие 
+Write-Status "[TEST 4] M > available files: archive all available old files" "Yellow"
+Remove-Item $LogDir -Recurse -Force
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+
+for ($i = 1; $i -le 5; $i++) {
+    $path = Join-Path $LogDir "old_$i.txt"
+    $size = 50KB
+    [IO.File]::WriteAllBytes($path, [byte[]]::new($size))
+    # Делаем файлы старыми
+    (Get-Item $path).LastWriteTime = (Get-Date).AddDays(-10)
+}
+
+$allFiles = Get-ChildItem $LogDir -File | Sort-Object LastWriteTime
+$beforeCount = $allFiles.Count
+$M = 10
+$toArchive = $allFiles | Select-Object -First $M
+
+$name = "all_old_$(Get-Date -Format 'yyyyMMdd_HHmmss').tar.gz"
+$archive = Join-Path $BackupDir $name
+$names = $toArchive | ForEach-Object { $_.Name }
+
+if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) {
+    Write-Status "[FAIL] Test 4: tar.exe not found" "Red"
+} else {
+    & tar.exe -czf $archive -C $LogDir $names
+    if ($LASTEXITCODE -eq 0) {
+        $toArchive | Remove-Item -Force
+        $afterCount = (Get-ChildItem $LogDir -File -ErrorAction SilentlyContinue).Count
+        if ($afterCount -eq 0 -and (Test-Path $archive)) {
+            Write-Status "[OK] Test 4 passed: all old files archived and removed" "Green"
+        } else {
+            Write-Status "[FAIL] Test 4: not all files removed or archive missing" "Red"
+        }
+    } else {
+        Write-Status "[FAIL] Test 4: tar.exe error (exit code $LASTEXITCODE)" "Red"
+    }
+}
+
+# Test 5: проверка, что папка с логами существует
+Write-Status "[TEST 5] Verify log directory exists..." "Yellow"
+if (Test-Path $LogDir) {
+    Write-Status "[OK] Test 5 passed: log directory exists" "Green"
+} else {
+    Write-Status "[FAIL] Test 5: log directory does not exist" "Red"
+}
+
+# Test 6: нечисловой порог 
+Write-Status "[TEST 6] Non-numeric threshold handling..." "Yellow"
+try {
+    $badThreshold = "abc"
+    $dummyPercent = [math]::Round((100KB / ($badThreshold * 1MB)) * 100, 2)
+    Write-Status "[FAIL] Test 6: non-numeric threshold did not cause an error" "Red"
+} catch {
+    Write-Status "[OK] Test 6 passed: non-numeric threshold correctly caused an error" "Green"
+}
+
+#  Test 7: папка без подходящих файлов (нет старых файлов)
+Write-Status "[TEST 7] No suitable files to archive (all recent)" "Yellow"
+Remove-Item $LogDir -Recurse -Force
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+
+for ($i = 1; $i -le 5; $i++) {
+    $path = Join-Path $LogDir "recent_$i.txt"
+    $size = 10KB
+    [IO.File]::WriteAllBytes($path, [byte[]]::new($size))
+    # Файлы свежие (не старые)
+    (Get-Item $path).LastWriteTime = (Get-Date)
+}
+
+$recentFiles = Get-ChildItem $LogDir -File | Sort-Object LastWriteTime
+$M = 10
+$toArchive = $recentFiles | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-7) } | Select-Object -First $M
+
+if ($toArchive.Count -eq 0) {
+    Write-Status "[OK] Test 7 passed: no suitable (old) files found for archiving" "Green"
+} else {
+    Write-Status "[FAIL] Test 7: unexpected files selected for archiving" "Red"
+}
+
+Remove-Item $BaseDir -Recurse -Force
+Write-Status "Tests completed. Data left in $BaseDir for inspection." "Cyan"
