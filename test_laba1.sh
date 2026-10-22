@@ -2,7 +2,7 @@
 # Использование: sudo ./test_backup.sh [размер_папки_MB] [заполнение_%] [мин_файлов] [макс_файлов]
 # Пример:        sudo ./test_backup.sh 50 70 10 40
 
-SCRIPT="$(dirname "$(readlink -f "$0")")/backup.sh"
+SCRIPT="$(dirname "$(readlink -f "$0")")/laba1.sh"
 
 SIZE_MB="${1:-50}"       # размер папки (отдельная ФС tmpfs)
 FILL_PCT="${2:-70}"      # на сколько % заполнить
